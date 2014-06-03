@@ -1,10 +1,14 @@
 package main
 import (
+    "bytes"
     "crypto/sha1"
     "encoding/hex"
     "flag"
     "fmt"
     "image"
+    "image/gif"
+    "image/png"
+    "image/jpeg"
     "io"
     "io/ioutil"
     "net/http"
@@ -14,10 +18,15 @@ import (
     "time"
     "github.com/nfnt/resize"
     "github.com/bradfitz/gomemcache/memcache"
-    _ "image/gif"
-    _ "image/png"
-    _ "image/jpeg"
 )
+
+type JobDescription struct {
+    Url string
+    Key string
+    Format string
+    MaxHeight uint64
+    MaxWidth uint64
+}
 
 var (
     globalMaxWidth uint64
@@ -30,25 +39,27 @@ var (
     memcacheAddr string
     jpegQuality int
 
+    marshaledTimeLength int
     errorPic image.Image
     standByPic image.Image
     mc *memcache.Client
-    formatsMime map[string]string {
-        "gif", "image/gif",
-        "png", "image/png",
-        "jpg", "image/jpeg",
-    }
     hc http.Client
+    workChan chan *JobDescription = make(chan *JobDescription, 100)
 )
+var formatsMime = map[string]string{
+        "gif": "image/gif",
+        "png": "image/png",
+        "jpg": "image/jpeg",
+}
 
 func init() {
     flag.Uint64Var(&globalMaxWidth, "maxwidth", 512, "max thumbnail width in pixels")
     flag.Uint64Var(&globalMaxHeight, "maxheight", 512, "max thumbnail height in pixels")
     flag.Uint64Var(&maxInDim, "maxindim", 1024, "max input image height or width in pixels")
     flag.Uint64Var(&maxInSize, "maxinsize", 20*1024*1024, "max input image size in bytes")
-    flag.IntVar(&jpegQuality, "quality", "", "jpeg quality, 0 to 100")
+    flag.IntVar(&jpegQuality, "quality", 80, "jpeg quality, 0 to 100")
     flag.StringVar(&errorPicName, "errorpic", "", "error picture")
-    flag.StringVar(&memcacheAddr, "memcache", "", "comma-separated list of memcache servers (no cache if empty)")
+    flag.StringVar(&memcacheAddr, "memcache", "127.0.0.1:11211", "comma-separated list of memcache servers")
     flag.StringVar(&listenAddr, "listen", "127.0.0.1:8080", "address and port to listen on")
 }
 
@@ -68,24 +79,24 @@ func parseOrDefault(s string, min uint64, max uint64, def uint64) uint64 {
     return n
 }
 
-func encodeImage(w io.Writer, img image.Image, fmt string) error.error {
+func encodeImage(w io.Writer, img image.Image, fmt string) error {
     switch fmt {
         case "png": return png.Encode(w, img)
-        case "gif": return jpeg.Encode(w, img)
+        case "gif": return gif.Encode(w, img, &gif.Options{NumColors: 256})
     }
-    return jpeg.Encode(w, img, jpeg.Options{Quality: jpegQuality} )
+    return jpeg.Encode(w, img, &jpeg.Options{Quality: jpegQuality} )
 }
 
-func renderThumbnail(w http.ResponseWriter, img image.Image, maxWidth uint64, maxHeight uint64, fmt string, store bool) {
-    thumb := resize.Thumbnail(maxWidth, maxHeight, img, resize.NearestNeighbor)
+func renderThumbnail(img image.Image, key string, lastMod time.Time,
+                        maxWidth uint64, maxHeight uint64, fmt string) {
+    thumb := resize.Thumbnail(uint(maxWidth), uint(maxHeight), img, resize.NearestNeighbor)
     var outbuf bytes.Buffer
-    encodeImage(outbuf, thumb, argFmt)
-    if store && mc != nil {
-        mc.Set(&memcache.Item{Key: key, Value: outbuf.Bytes()})
-    }
-    hdr := w.Header()
-    now := time.Now()
-    hdr.Set("Last-Modified", now.UTC().Format(TimeFormat))
+    encodeImage(&outbuf, thumb, fmt)
+    thumbHash := sha1.New()
+    bytes.NewReader(outbuf.Bytes()).WriteTo(thumbHash)
+    etag := hex.EncodeToString(thumbHash.Sum(nil))
+    if len(etag) != 40 { return }
+    saveThumb(key, []byte(etag), []byte{}, lastMod, outbuf.Bytes())
     return
 }
 
@@ -100,11 +111,12 @@ func thumbHandler(w http.ResponseWriter, r *http.Request) {
     argUrl := r.Form.Get("img")
     argFmt := r.Form.Get("fmt")
     mimeType,ok := formatsMime[argFmt]
-    w.Header()["Content-Type"] = mimeType
     if !ok {
         argFmt = "png"
-        memeType = formatsMime["png"]
+        mimeType = formatsMime["png"]
     }
+    hdr := w.Header()
+    hdr["Content-Type"] = []string{mimeType}
     argMax := r.Form.Get("max")
     if argMax != "" {
         maxWidth = parseOrDefault(argMax, 1, globalMaxWidth, globalMaxHeight)
@@ -113,51 +125,84 @@ func thumbHandler(w http.ResponseWriter, r *http.Request) {
         maxWidth = parseOrDefault(r.Form.Get("mx"), 1, globalMaxWidth, globalMaxWidth)
         maxHeight = parseOrDefault(r.Form.Get("my"), 1, globalMaxHeight, globalMaxHeight)
     }
-    h := sha1.New()
-    io.WriteString(h, argUrl)
-    key := fmt.Sprintf("%s-%dx%d-%s", argFmt, maxWidth, maxHeight, hex.EncodeToString(h.Sum(nil)))[:250]
     if mc != nil {
+        h := sha1.New()
+        io.WriteString(h, argUrl)
+        key := fmt.Sprintf("%s-%dx%d-%s", argFmt, maxWidth, maxHeight, hex.EncodeToString(h.Sum(nil)))[:250]
         item, err := mc.Get(key)
-        standby := false
         if err == nil { 
-            if len(item.Value) != 1 {
-                w.Header()["Content-Length"] = len(item.Value)
-                w.Write(item.Value)
+            if len(item.Value) >= 86 {
+                thumbEtag := item.Value[0:40]
+                //originalEtag := item.Value[40:80]
+                lastModBytes := item.Value[80:80+marshaledTimeLength]
+                lastMod := time.Time{}
+                lastMod.UnmarshalBinary(lastModBytes)
+                dataBytes := item.Value[80+marshaledTimeLength:]
+                hdr.Set("Last-Modified", lastMod.Format(http.TimeFormat))
+                hdr.Set("Etag", string(thumbEtag))
+                hdr.Set("Content-Length", strconv.Itoa(len(dataBytes)))
+                w.Write(dataBytes)
                 return
             }
-            standby = true
         } else if err == memcache.ErrCacheMiss {
             err = mc.Add(&memcache.Item{Key: key, Value: []byte("X")})
-            if err == memcache.ErrNotStored { standby = true }
-        }
-        if standby {
-            w.Header()["
-            renderThumbnail(w, standByPic, maxWidth, maxHeight, argFmt, false)
-            return
+            if err != memcache.ErrNotStored {
+                workChan <- &JobDescription{
+                    Url: argUrl, Key: key, Format: argFmt,
+                    MaxHeight: maxHeight, MaxWidth: maxWidth,
+                }
+            }
         }
     }
-    req, err := http.NewRequest("GET", argUrl, nil)
-    if err != nil { goto Error }
-    req.Header.Set("User-Agent", "bnw-thumb/1.0 (http://github.com/stiletto/bnw-thumb)")
-    resp, err := hc.Do(req)
-    if err != nil { goto Error }
-    defer resp.Body.Close()
-    if resp.StatusCode != 200 || resp.ContentLength > maxInSize { goto Error }
-    var buf bytes.Buffer
-    b.Grow(resp.ContentLength)
-    bytebuf, err := ioutil.ReadAll(resp.Body)
-    if err != nil { goto Error }
-    bufreader := bytes.NewReader(bytebuf)
-    config, _, err := image.DecodeConfig(bufreader)
-    if err != nil || config.Width > maxInDim || config.Height > maxInDim { goto Error }
-    bufreader.Seek(0,0)
-    img, _, err := image.Decode(bufreader)
-    if err != nil { goto Error }
-    renderThumbnail(w, img, maxWidth, maxHeight, argFmt, true)
+
+    thumb := resize.Thumbnail(uint(maxWidth), uint(maxHeight), standByPic, resize.NearestNeighbor)
+    hdr.Set("Last-Modified", time.Now().UTC().Format(http.TimeFormat))
+    hdr.Set("Cache-control", "max-age=5, public")
+    hdr.Set("Etag", fmt.Sprintf("standby-%d-%d-%s", maxWidth, maxHeight, argFmt))
+    encodeImage(w, thumb, argFmt)
     return
-Error:
-    renderThumbnail(w, errorPic, maxWidth, maxHeight, argFmt, true)
-    return
+}
+
+func saveThumb(Key string, Etag []byte, OriginEtag []byte, LastMod time.Time, data []byte) error {
+    if mc != nil {
+        value := make([]byte, 0, 128)
+        lastModBytes, _ := LastMod.MarshalBinary()
+        OriginEtag := []byte("0000000000000000000000000000000000000000") // not used yet
+        value = append(value, Etag...)
+        value = append(value, OriginEtag...)
+        value = append(value, lastModBytes...)
+        value = append(value, data...)
+        return mc.Set(&memcache.Item{Key: Key, Value: value })
+    }
+    return nil
+}
+
+func renderWorker() {
+    for job := range workChan {
+        closeBody := false
+        req, err := http.NewRequest("GET", job.Url, nil)
+        if err != nil { goto Error }
+        req.Header.Set("User-Agent", "bnw-thumb/1.0 (http://github.com/stiletto/bnw-thumb)")
+        resp, err := hc.Do(req)
+        if err != nil { goto Error }
+        closeBody = true
+        if resp.StatusCode != 200 || uint64(resp.ContentLength) > maxInSize { goto Error }
+        bytebuf, err := ioutil.ReadAll(resp.Body)
+        if err != nil { goto Error }
+        bufreader := bytes.NewReader(bytebuf)
+        config, _, err := image.DecodeConfig(bufreader)
+        if err != nil || uint64(config.Width) > maxInDim || uint64(config.Height) > maxInDim { goto Error }
+        bufreader.Seek(0,0)
+        img, _, err := image.Decode(bufreader)
+        if err != nil { goto Error }
+        if closeBody { resp.Body.Close() }
+        renderThumbnail(img, job.Key, time.Now(), job.MaxWidth, job.MaxHeight, job.Format)
+        return
+    Error:
+        if closeBody { resp.Body.Close() }
+        renderThumbnail(errorPic, job.Key, time.Now(), job.MaxWidth, job.MaxHeight, job.Format)
+        return
+    }
 }
 
 func loadPicOrEmpty(name string) image.Image {
@@ -190,7 +235,14 @@ func main() {
     mc = nil
     if memcacheAddr != "" {
         mc = memcache.New(strings.Split(memcacheAddr, ",")...)
+    } else {
+        fmt.Fprintf(os.Stderr, "Warning: Memcache is required for bnw-thumb to work.\n")
+        fmt.Fprintf(os.Stderr, "Warning: Without memcache no thumbnails will be actually generated. Use only for testing.\n")
     }
+    marshaledNow, _ := time.Now().MarshalBinary()
+    // we know that time.Time always has the same length when marshaled
+    // but this is kinda implementation dependant hack
+    marshaledTimeLength = len(marshaledNow)
     errorPic = loadPicOrEmpty(errorPicName)
     standByPic = loadPicOrEmpty(standByPicName)
     http.HandleFunc("/", thumbHandler)
