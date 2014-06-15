@@ -59,6 +59,7 @@ func init() {
     flag.Uint64Var(&maxInSize, "maxinsize", 20*1024*1024, "max input image size in bytes")
     flag.IntVar(&jpegQuality, "quality", 80, "jpeg quality, 0 to 100")
     flag.StringVar(&errorPicName, "errorpic", "", "error picture")
+    flag.StringVar(&standByPicName, "standbypic", "", "standby picture")
     flag.StringVar(&memcacheAddr, "memcache", "127.0.0.1:11211", "comma-separated list of memcache servers")
     flag.StringVar(&listenAddr, "listen", "127.0.0.1:8080", "address and port to listen on")
 }
@@ -128,7 +129,8 @@ func thumbHandler(w http.ResponseWriter, r *http.Request) {
     if mc != nil {
         h := sha1.New()
         io.WriteString(h, argUrl)
-        key := fmt.Sprintf("%s-%dx%d-%s", argFmt, maxWidth, maxHeight, hex.EncodeToString(h.Sum(nil)))[:250]
+        key := fmt.Sprintf("%s-%dx%d-%s", argFmt, maxWidth, maxHeight, hex.EncodeToString(h.Sum(nil)))
+        if len(key)> 250 { key=key[:250] }
         item, err := mc.Get(key)
         if err == nil { 
             if len(item.Value) >= 86 {
@@ -179,29 +181,37 @@ func saveThumb(Key string, Etag []byte, OriginEtag []byte, LastMod time.Time, da
 
 func renderWorker() {
     for job := range workChan {
-        closeBody := false
+        fmt.Fprintf(os.Stderr, "Generating \"%s\" %s %dx%d\n", job.Url, job.Format, job.MaxWidth, job.MaxHeight)
         req, err := http.NewRequest("GET", job.Url, nil)
-        if err != nil { goto Error }
-        req.Header.Set("User-Agent", "bnw-thumb/1.0 (http://github.com/stiletto/bnw-thumb)")
-        resp, err := hc.Do(req)
-        if err != nil { goto Error }
-        closeBody = true
-        if resp.StatusCode != 200 || uint64(resp.ContentLength) > maxInSize { goto Error }
-        bytebuf, err := ioutil.ReadAll(resp.Body)
-        if err != nil { goto Error }
-        bufreader := bytes.NewReader(bytebuf)
-        config, _, err := image.DecodeConfig(bufreader)
-        if err != nil || uint64(config.Width) > maxInDim || uint64(config.Height) > maxInDim { goto Error }
-        bufreader.Seek(0,0)
-        img, _, err := image.Decode(bufreader)
-        if err != nil { goto Error }
-        if closeBody { resp.Body.Close() }
-        renderThumbnail(img, job.Key, time.Now(), job.MaxWidth, job.MaxHeight, job.Format)
-        return
-    Error:
-        if closeBody { resp.Body.Close() }
+        if err == nil {
+            req.Header.Set("User-Agent", "bnw-thumb/1.0 (http://github.com/stiletto/bnw-thumb)")
+            closeBody := false
+            resp, err := hc.Do(req)
+            if err == nil {
+                closeBody = true
+                if resp.StatusCode == 200 || uint64(resp.ContentLength) <= maxInSize {
+                    bytebuf, err := ioutil.ReadAll(resp.Body)
+                    if err == nil {
+                        bufreader := bytes.NewReader(bytebuf)
+                        config, _, err := image.DecodeConfig(bufreader)
+                        if err == nil && uint64(config.Width) <= maxInDim && uint64(config.Height) <= maxInDim {
+                            bufreader.Seek(0,0)
+                            img, _, err := image.Decode(bufreader)
+                            if err == nil {
+                                if closeBody { resp.Body.Close() }
+                                fmt.Fprintf(os.Stderr, "Generated \"%s\" %s %dx%d\n", job.Url, job.Format, job.MaxWidth, job.MaxHeight)
+                                renderThumbnail(img, job.Key, time.Now(), job.MaxWidth, job.MaxHeight, job.Format)
+                                continue
+                            }
+                        }
+                    }
+                }
+            }
+            fmt.Fprintf(os.Stderr, "Failed to generate \"%s\" %s %dx%d (%d, %d)\n", job.Url, job.Format,
+                job.MaxWidth, job.MaxHeight, resp.StatusCode, resp.ContentLength )
+            if closeBody { resp.Body.Close() }
+        }
         renderThumbnail(errorPic, job.Key, time.Now(), job.MaxWidth, job.MaxHeight, job.Format)
-        return
     }
 }
 
@@ -246,5 +256,7 @@ func main() {
     errorPic = loadPicOrEmpty(errorPicName)
     standByPic = loadPicOrEmpty(standByPicName)
     http.HandleFunc("/", thumbHandler)
+    go renderWorker()
+    fmt.Fprintf(os.Stderr, "Going to listen on %s\n", listenAddr)
     http.ListenAndServe(listenAddr, nil)
 }
