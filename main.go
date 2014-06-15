@@ -3,6 +3,7 @@ import (
     "bytes"
     "crypto/sha1"
     "encoding/hex"
+    "encoding/json"
     "flag"
     "fmt"
     "image"
@@ -11,10 +12,13 @@ import (
     "image/jpeg"
     "io"
     "io/ioutil"
+    "net"
     "net/http"
+    "net/url"
     "os"
     "strconv"
     "strings"
+    "sync/atomic"
     "time"
     "github.com/nfnt/resize"
     "github.com/bradfitz/gomemcache/memcache"
@@ -46,11 +50,22 @@ var (
     hc http.Client
     workChan chan *JobDescription = make(chan *JobDescription, 100)
 )
+
 var formatsMime = map[string]string{
         "gif": "image/gif",
         "png": "image/png",
         "jpg": "image/jpeg",
 }
+
+type StatusStruct struct {
+    FreeWorkers uint64
+    QueueLen int
+    RequestsProcessed uint64
+    ThumbsGenerated uint64
+    ThumbsFailed uint64
+    WorkerStatus []*JobDescription
+}
+var status StatusStruct
 
 func init() {
     flag.Uint64Var(&globalMaxWidth, "maxwidth", 512, "max thumbnail width in pixels")
@@ -101,7 +116,9 @@ func renderThumbnail(img image.Image, key string, lastMod time.Time,
     return
 }
 
+
 func thumbHandler(w http.ResponseWriter, r *http.Request) {
+    atomic.AddUint64(&status.RequestsProcessed, 1)
     if r.Method != "GET" {
         http.Error(w,"Method not allowed", http.StatusMethodNotAllowed)
         return
@@ -143,6 +160,7 @@ func thumbHandler(w http.ResponseWriter, r *http.Request) {
                 hdr.Set("Last-Modified", lastMod.Format(http.TimeFormat))
                 hdr.Set("Etag", string(thumbEtag))
                 hdr.Set("Content-Length", strconv.Itoa(len(dataBytes)))
+                hdr.Set("Cache-control", "max-age=604800, public")
                 w.Write(dataBytes)
                 return
             }
@@ -159,7 +177,7 @@ func thumbHandler(w http.ResponseWriter, r *http.Request) {
 
     thumb := resize.Thumbnail(uint(maxWidth), uint(maxHeight), standByPic, resize.NearestNeighbor)
     hdr.Set("Last-Modified", time.Now().UTC().Format(http.TimeFormat))
-    hdr.Set("Cache-control", "max-age=5, public")
+    hdr.Set("Cache-control", "max-age=5, public, must-revalidate")
     hdr.Set("Etag", fmt.Sprintf("standby-%d-%d-%s", maxWidth, maxHeight, argFmt))
     encodeImage(w, thumb, argFmt)
     return
@@ -179,10 +197,59 @@ func saveThumb(Key string, Etag []byte, OriginEtag []byte, LastMod time.Time, da
     return nil
 }
 
-func renderWorker() {
+
+func statusHandler(w http.ResponseWriter, r *http.Request) {
+    if r.Method != "GET" {
+        http.Error(w,"Method not allowed", http.StatusMethodNotAllowed)
+        return
+    }
+    r.ParseForm()
+    argFormat := r.Form.Get("format")
+
+    hdr := w.Header()
+
+    status.FreeWorkers = 0
+    for _, v:= range status.WorkerStatus {
+        if v == nil {
+            status.FreeWorkers += 1
+        }
+    }
+
+    status.QueueLen = len(workChan)
+    if argFormat == "json" {
+        hdr.Set("Content-Type", "application/json")
+        stjson, _ := json.Marshal(status)
+        w.Write(stjson)
+    } else if argFormat == "jsonindent" {
+        hdr.Set("Content-Type", "application/json")
+        stjson, _ := json.MarshalIndent(status,"", "  ")
+        w.Write(stjson)
+    } else {
+        hdr.Set("Content-Type", "text/html")
+        fmt.Fprintf(w, "<html><body><pre>\n")
+        fmt.Fprintf(w, "Free workers: %d/%d\n", status.FreeWorkers, 10)
+        fmt.Fprintf(w, "Queue len: %d\n", status.QueueLen)
+        fmt.Fprintf(w, "Requests processed: %d\n", status.RequestsProcessed)
+        fmt.Fprintf(w, "Thumbnails generated/failed: %d/%d\n", status.ThumbsGenerated, status.ThumbsFailed)
+        fmt.Fprintf(w, "Workers:\n")
+        for k, v:= range status.WorkerStatus {
+            if v == nil {
+                status.FreeWorkers += 1
+                fmt.Fprintf(w, " - %d - Free\n", k)
+            } else {
+                fmt.Fprintf(w, " - %d - %s\n", k, v.Url)
+            }
+        }
+        fmt.Fprintf(w, "</pre></body></html>")
+    }
+}
+
+func renderWorker(currentJob **JobDescription) {
     for job := range workChan {
+        *currentJob = job
         fmt.Fprintf(os.Stderr, "Generating \"%s\" %s %dx%d\n", job.Url, job.Format, job.MaxWidth, job.MaxHeight)
         req, err := http.NewRequest("GET", job.Url, nil)
+        addst := ""
         if err == nil {
             req.Header.Set("User-Agent", "bnw-thumb/1.0 (http://github.com/stiletto/bnw-thumb)")
             closeBody := false
@@ -198,20 +265,33 @@ func renderWorker() {
                             bufreader.Seek(0,0)
                             img, _, err := image.Decode(bufreader)
                             if err == nil {
-                                if closeBody { resp.Body.Close() }
                                 fmt.Fprintf(os.Stderr, "Generated \"%s\" %s %dx%d\n", job.Url, job.Format, job.MaxWidth, job.MaxHeight)
+                                if closeBody { resp.Body.Close() }
                                 renderThumbnail(img, job.Key, time.Now(), job.MaxWidth, job.MaxHeight, job.Format)
+                                atomic.AddUint64(&status.ThumbsGenerated, 1)
+                                *currentJob = nil
                                 continue
                             }
                         }
                     }
                 }
             }
-            fmt.Fprintf(os.Stderr, "Failed to generate \"%s\" %s %dx%d (%d, %d)\n", job.Url, job.Format,
-                job.MaxWidth, job.MaxHeight, resp.StatusCode, resp.ContentLength )
+            switch e := err.(type) {
+                case *url.Error:
+                    addst = fmt.Sprintf("URL Error: %#v", e.Err)
+                default:
+                    addst = fmt.Sprintf("%#v", e)
+            }
+            if resp != nil {
+                addst = fmt.Sprintf("%d, %d, %#v", resp.StatusCode, resp.ContentLength, addst )
+            }
+            fmt.Fprintf(os.Stderr, "Failed to generate \"%s\" %s %dx%d (%s)\n", job.Url, job.Format,
+                        job.MaxWidth, job.MaxHeight, addst)
             if closeBody { resp.Body.Close() }
         }
         renderThumbnail(errorPic, job.Key, time.Now(), job.MaxWidth, job.MaxHeight, job.Format)
+        atomic.AddUint64(&status.ThumbsFailed, 1)
+        *currentJob = nil
     }
 }
 
@@ -255,8 +335,16 @@ func main() {
     marshaledTimeLength = len(marshaledNow)
     errorPic = loadPicOrEmpty(errorPicName)
     standByPic = loadPicOrEmpty(standByPicName)
+    http.HandleFunc("/status", statusHandler)
     http.HandleFunc("/", thumbHandler)
-    go renderWorker()
+    status.WorkerStatus = make([]*JobDescription, 10)
+    for i := 0; i < 10; i++ {
+        go renderWorker(&status.WorkerStatus[i])
+    }
+    hc.Transport = &http.Transport{Proxy: http.ProxyFromEnvironment,
+                                   ResponseHeaderTimeout: 10*time.Second,
+                                   Dial: func (network, address string) (net.Conn, error) {
+                                        return net.DialTimeout(network, address, 10*time.Second) }}
     fmt.Fprintf(os.Stderr, "Going to listen on %s\n", listenAddr)
     http.ListenAndServe(listenAddr, nil)
 }
