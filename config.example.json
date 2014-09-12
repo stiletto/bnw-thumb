@@ -1,0 +1,21 @@
+{
+    "listen": "127.0.0.1:8080",
+    "listen_gc": "127.0.0.1:8081",
+    "peers": [],
+
+    "loader": "http",
+    "loader_args": {
+        "timeout": "10",
+        "max_size": "20*1024*1024"
+    },
+    "storage": "memcache",
+    "storage_args": {
+        "addr": "127.0.0.1:11211"
+    },
+
+    "max_width": 512,
+    "max_height": 512,
+
+    "max_in_dim": 1024,
+    "jpeg_quality": 80
+}
