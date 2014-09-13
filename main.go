@@ -77,7 +77,7 @@ func init() {
 }
 
 type Configuration struct {
-    Size int `json:"size"`
+    Size int64 `json:"size"`
     Listen string `json:"listen"`
     ListenGC string `json:"listen_gc"`
     Me string `json:"me"`
