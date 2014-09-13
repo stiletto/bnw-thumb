@@ -77,6 +77,7 @@ func init() {
 }
 
 type Configuration struct {
+    Size int `json:"size"`
     Listen string `json:"listen"`
     ListenGC string `json:"listen_gc"`
     Me string `json:"me"`
@@ -142,7 +143,7 @@ func main() {
         peers.Set(Config.Peers...)
         go http.ListenAndServe(Config.ListenGC, http.HandlerFunc(peers.ServeHTTP))
     }
-    Group = groupcache.NewGroup("bnw-thumb", 64<<20, renderer)
+    Group = groupcache.NewGroup("bnw-thumb", Config.Size<<20, renderer)
 
     //http.HandleFunc("/status", statusHandler)
     //http.HandleFunc("/", thumbHandler)
