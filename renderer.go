@@ -7,6 +7,7 @@ import (
     "image/jpeg"
     "image/gif"
     "io"
+    "log"
     "strconv"
     "strings"
     "sync/atomic"
@@ -22,7 +23,6 @@ type Renderer struct {
     MaxInDim int
 
     JpegQuality int
-
 }
 
 func (r *Renderer) Get(ctx groupcache.Context, key string, dest groupcache.Sink) error {
@@ -74,6 +74,7 @@ func (r *Renderer) Render(url string) ([]byte, error) {
     thumb := resize.Thumbnail(uint(width), uint(height), img, resize.NearestNeighbor)
     var outbuf bytes.Buffer
     encodeImage(&outbuf, thumb, format, r.JpegQuality)
+    log.Printf("Rendered (%dx%d %s) -> (%dx%d): %s", config.Width, config.Height, format, width, height, splitUrl[2])
     return outbuf.Bytes(), nil
 }
 

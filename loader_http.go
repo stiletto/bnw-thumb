@@ -22,7 +22,7 @@ type HttpLoaderError struct {
     Url string
 }
 func (le *HttpLoaderError) Error() string {
-    return fmt.Sprintf("%s: %#v", le.Where, le.What)
+    return fmt.Sprintf("%s: %s (%s)", le.Where, le.What.Error(), le.Url)
 }
 
 func NewHttpLoader(args map[string]string) SourceLoader {

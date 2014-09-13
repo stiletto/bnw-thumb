@@ -57,7 +57,7 @@ func thumbHandler(w http.ResponseWriter, r *http.Request) {
     var data []byte
     err := Group.Get(ctx, uri[2], groupcache.AllocatingByteSliceSink(&data))
     if err != nil {
-        log.Printf("GC: %#v", err)
+        log.Printf("GC: %s", err.Error())
         if v, ok := err.(*HttpLoaderError); ok {
             if v2, ok := v.What.(*url.Error); ok {
                 if v3, ok := v2.Err.(*net.OpError); ok {
@@ -79,6 +79,7 @@ func init() {
 type Configuration struct {
     Listen string `json:"listen"`
     ListenGC string `json:"listen_gc"`
+    Me string `json:"me"`
     Peers []string `json:"peers"`
     Loader string `json:"loader"`
     LoaderArgs map[string]string `json:"loader_args"`
@@ -131,14 +132,20 @@ func main() {
         JpegQuality: Config.JpegQuality,
     }
 
-    peers := groupcache.NewHTTPPool(Config.ListenGC)
-    if len(Config.Peers) >0 {
+    if Config.ListenGC == "" {
+        if strings.HasPrefix(Config.Me,"http://") {
+            Config.ListenGC = Config.Me[7:len(Config.Me)]
+        }
+    }
+    peers := groupcache.NewHTTPPool(Config.Me)
+    if len(Config.Peers) > 0 {
         peers.Set(Config.Peers...)
+        go http.ListenAndServe(Config.ListenGC, http.HandlerFunc(peers.ServeHTTP))
     }
     Group = groupcache.NewGroup("bnw-thumb", 64<<20, renderer)
 
-    http.HandleFunc("/status", statusHandler)
-    http.HandleFunc("/", thumbHandler)
+    //http.HandleFunc("/status", statusHandler)
+    //http.HandleFunc("/", thumbHandler)
     fmt.Fprintf(os.Stderr, "Going to listen on %s\n", Config.Listen)
     server := &http.Server{Addr: Config.Listen, Handler: Handler{}}
     server.ListenAndServe()
