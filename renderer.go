@@ -6,6 +6,7 @@ import (
     "image/png"
     "image/jpeg"
     "image/gif"
+    _ "golang.org/x/image/webp"
     "io"
     "log"
     "strconv"
