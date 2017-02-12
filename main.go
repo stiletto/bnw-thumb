@@ -13,6 +13,7 @@ import (
 	"net/url"
 	"os"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 )
@@ -22,9 +23,16 @@ var (
 )
 
 type StatusStruct struct {
-	RequestsProcessed uint64
-	ThumbsGenerated   uint64
-	ThumbsFailed      uint64
+	RequestsReceived uint64
+	Inflight         uint64
+	ThumbsGenerated  uint64
+	ThumbsFailed     uint64
+}
+
+type StatusResponse struct {
+	Thumbs    StatusStruct
+	HotCache  groupcache.CacheStats
+	MainCache groupcache.CacheStats
 }
 
 var status StatusStruct
@@ -38,12 +46,18 @@ func statusHandler(w http.ResponseWriter, r *http.Request) {
 	hdr := w.Header()
 
 	hdr.Set("Content-Type", "application/json")
-	stjson, _ := json.MarshalIndent(status, "", "  ")
+	var resp StatusResponse
+	resp.Thumbs = status
+	resp.MainCache = Group.CacheStats(groupcache.MainCache)
+	resp.HotCache = Group.CacheStats(groupcache.HotCache)
+	stjson, _ := json.MarshalIndent(resp, "", "  ")
 	w.Write(stjson)
 }
 
 func thumbHandler(w http.ResponseWriter, r *http.Request) {
-	atomic.AddUint64(&status.RequestsProcessed, 1)
+	atomic.AddUint64(&status.RequestsReceived, 1)
+	atomic.AddUint64(&status.Inflight, 1)
+	defer atomic.AddUint64(&status.Inflight, 0xffffffffffffffff)
 	if r.Method != "GET" {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		return
@@ -89,6 +103,17 @@ type Configuration struct {
 	MaxHeight   int               `json:"max_height"`
 	MaxInDim    int               `json:"max_in_dim"`
 	JpegQuality int               `json:"jpeg_quality"`
+}
+
+type InflightMap struct {
+	data map[*http.Request]time.Time
+	mu   sync.Mutex
+}
+
+func (im *InflightMap) Put(req *http.Request) {
+	im.mu.Lock()
+	defer im.mu.Unlock()
+	im.data[req] = time.Now()
 }
 
 var (

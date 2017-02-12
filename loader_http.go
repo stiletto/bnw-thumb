@@ -42,12 +42,16 @@ func NewHttpLoader(args map[string]string) SourceLoader {
 
 	l := &HttpLoader{}
 	l.maxsize = max_size
-	l.hc.Transport = &http.Transport{Proxy: http.ProxyFromEnvironment,
-		ResponseHeaderTimeout: timeout,
-		TLSHandshakeTimeout:   timeout,
-		Dial: func(network, address string) (net.Conn, error) {
-			return net.DialTimeout(network, address, timeout)
-		}}
+	l.hc = http.Client{
+		Timeout: timeout,
+		Transport: &http.Transport{Proxy: http.ProxyFromEnvironment,
+			ResponseHeaderTimeout: timeout,
+			TLSHandshakeTimeout:   timeout,
+			Dial: func(network, address string) (net.Conn, error) {
+				return net.DialTimeout(network, address, timeout)
+			},
+		},
+	}
 	return l
 }
 
