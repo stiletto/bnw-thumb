@@ -3,18 +3,19 @@ package main
 import (
 	"bytes"
 	"errors"
-	"github.com/golang/groupcache"
-	"github.com/nfnt/resize"
-	_ "golang.org/x/image/webp"
 	"image"
 	"image/gif"
 	"image/jpeg"
 	"image/png"
-	"io"
 	"log"
 	"strconv"
 	"strings"
 	"sync/atomic"
+	"time"
+
+	"github.com/golang/groupcache"
+	"github.com/nfnt/resize"
+	_ "golang.org/x/image/webp"
 )
 
 type Renderer struct {
@@ -79,11 +80,31 @@ func (r *Renderer) Render(url string) ([]byte, error) {
 		return nil, err
 	}
 
-	thumb := resize.Thumbnail(uint(width), uint(height), img, resize.NearestNeighbor)
+	imgThumb := resize.Thumbnail(uint(width), uint(height), img, resize.NearestNeighbor)
+	thumb := &Thumb{
+		Created: time.Now(),
+		Height:  int32(imgThumb.Bounds().Dy()),
+		Width:   int32(imgThumb.Bounds().Dx()),
+	}
 	var outbuf bytes.Buffer
-	encodeImage(&outbuf, thumb, format, r.JpegQuality)
+	switch format {
+	case "png":
+		err = png.Encode(&outbuf, imgThumb)
+		thumb.Mime = "image/png"
+	case "gif":
+		err = gif.Encode(&outbuf, imgThumb, &gif.Options{NumColors: 256})
+		thumb.Mime = "image/gif"
+	default:
+		err = jpeg.Encode(&outbuf, imgThumb, &jpeg.Options{Quality: r.JpegQuality})
+		thumb.Mime = "image/jpeg"
+	}
+	if err != nil {
+		return nil, err
+	}
+	thumb.Data = outbuf.Bytes()
+
 	log.Printf("Rendered (%dx%d %s) -> (%dx%d): %s", config.Width, config.Height, format, width, height, splitUrl[2])
-	return outbuf.Bytes(), nil
+	return thumb.Marshal(nil)
 }
 
 func parseOrDefault(s string, min int, max int, def int) int {
@@ -102,12 +123,4 @@ func parseOrDefault(s string, min int, max int, def int) int {
 	return int(n)
 }
 
-func encodeImage(w io.Writer, img image.Image, fmt string, jq int) error {
-	switch fmt {
-	case "png":
-		return png.Encode(w, img)
-	case "gif":
-		return gif.Encode(w, img, &gif.Options{NumColors: 256})
-	}
-	return jpeg.Encode(w, img, &jpeg.Options{Quality: jq})
-}
+//go:generate gencode go -schema thumb.schema

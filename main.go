@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
-	"github.com/golang/groupcache"
 	"io/ioutil"
 	"log"
 	"net"
@@ -16,6 +15,8 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/golang/groupcache"
 )
 
 var (
@@ -83,8 +84,17 @@ func thumbHandler(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Unable to retreive", 404)
 		return
 	}
-	var modTime time.Time
-	http.ServeContent(w, r, "big-file-thumb.jpg", modTime, bytes.NewReader(data))
+	var thumb Thumb
+	if _, err = thumb.Unmarshal(data); err != nil {
+		log.Printf("Unmarshal: %s", err)
+		http.Error(w, "Internal error", 500)
+		return
+	}
+	w.Header().Set("Content-Type", thumb.Mime)
+	if Config.ResponseAge > 0 {
+		w.Header().Set("Cache-Control", fmt.Sprintf("public, max-age=%d", Config.ResponseAge))
+	}
+	http.ServeContent(w, r, "", thumb.Created, bytes.NewReader(thumb.Data))
 }
 
 func init() {
@@ -101,6 +111,7 @@ type Configuration struct {
 	LoaderArgs  map[string]string `json:"loader_args"`
 	MaxWidth    int               `json:"max_width"`
 	MaxHeight   int               `json:"max_height"`
+	ResponseAge int               `json:"response_age"`
 	MaxInDim    int               `json:"max_in_dim"`
 	JpegQuality int               `json:"jpeg_quality"`
 }
