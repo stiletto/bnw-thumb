@@ -80,7 +80,7 @@ func (r *Renderer) Render(url string) ([]byte, error) {
 		return nil, err
 	}
 
-	imgThumb := resize.Thumbnail(uint(width), uint(height), img, resize.NearestNeighbor)
+	imgThumb := resize.Thumbnail(uint(width), uint(height), img, resize.Lanczos3)
 	thumb := &Thumb{
 		Created: time.Now(),
 		Height:  int32(imgThumb.Bounds().Dy()),
