@@ -46,14 +46,14 @@ var RenderWrongSize = errors.New("Wrong size.")
 var RenderTooLarge = errors.New("One of image dimensions is too large.")
 
 func (r *Renderer) Render(url string) ([]byte, error) {
-	splitUrl := strings.SplitN(url, "/", 3)
-	if len(splitUrl) != 3 {
+	splitURL := strings.SplitN(url, "/", 3)
+	if len(splitURL) != 3 {
 		return nil, RenderWrongUrl
 	}
-	if splitUrl[0] != "fit-in" {
+	if splitURL[0] != "fit-in" {
 		return nil, RenderWrongPrefix
 	}
-	splitSize := strings.SplitN(splitUrl[1], "x", 2)
+	splitSize := strings.SplitN(splitURL[1], "x", 2)
 	if len(splitSize) != 2 {
 		return nil, RenderWrongSize
 	}
@@ -61,7 +61,7 @@ func (r *Renderer) Render(url string) ([]byte, error) {
 	width := parseOrDefault(splitSize[0], 1, r.MaxWidth, r.MaxWidth)
 	height := parseOrDefault(splitSize[1], 1, r.MaxHeight, r.MaxHeight)
 
-	data, err := r.Loader.Load(splitUrl[2])
+	data, err := r.Loader.Load(splitURL[2])
 	if err != nil {
 		return nil, err
 	}
@@ -104,7 +104,7 @@ func (r *Renderer) Render(url string) ([]byte, error) {
 	}
 	thumb.Data = outbuf.Bytes()
 
-	log.Printf("Rendered (%dx%d %s) -> (%dx%d): %s", config.Width, config.Height, format, width, height, splitUrl[2])
+	log.Printf("Rendered (%dx%d %s) -> (%dx%d): %s", config.Width, config.Height, format, width, height, splitURL[2])
 	return thumb.Marshal(nil)
 }
 

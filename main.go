@@ -5,18 +5,16 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
-	"io/ioutil"
 	"log"
 	"net"
 	"net/http"
 	"net/url"
 	"os"
 	"strings"
-	"sync"
 	"sync/atomic"
-	"time"
 
 	"github.com/golang/groupcache"
+	"gopkg.in/yaml.v3"
 )
 
 var (
@@ -73,14 +71,14 @@ func thumbHandler(w http.ResponseWriter, r *http.Request) {
 	err := Group.Get(r.Context(), uri[2], groupcache.AllocatingByteSliceSink(&data))
 	if err != nil {
 		log.Printf("GC: %s", err.Error())
-		if v, ok := err.(*HttpLoaderError); ok {
+		if v, ok := err.(*HTTPLoaderError); ok {
 			if v2, ok := v.What.(*url.Error); ok {
 				if v3, ok := v2.Err.(*net.OpError); ok {
 					log.Printf("GCue: %#v", v3)
 				}
 			}
 		}
-		http.Error(w, "Unable to retreive", 404)
+		http.Error(w, "Unable to retrieve", 404)
 		return
 	}
 	var thumb Thumb
@@ -96,34 +94,19 @@ func thumbHandler(w http.ResponseWriter, r *http.Request) {
 	http.ServeContent(w, r, "", thumb.Created, bytes.NewReader(thumb.Data))
 }
 
-func init() {
-	flag.StringVar(&configName, "config", "config.json", "configuration file name")
-}
-
 type Configuration struct {
-	Size        int64             `json:"size"`
-	Listen      string            `json:"listen"`
-	ListenGC    string            `json:"listen_gc"`
-	Me          string            `json:"me"`
-	Peers       []string          `json:"peers"`
-	Loader      string            `json:"loader"`
-	LoaderArgs  map[string]string `json:"loader_args"`
-	MaxWidth    int               `json:"max_width"`
-	MaxHeight   int               `json:"max_height"`
-	ResponseAge int               `json:"response_age"`
-	MaxInDim    int               `json:"max_in_dim"`
-	JpegQuality int               `json:"jpeg_quality"`
-}
-
-type InflightMap struct {
-	data map[*http.Request]time.Time
-	mu   sync.Mutex
-}
-
-func (im *InflightMap) Put(req *http.Request) {
-	im.mu.Lock()
-	defer im.mu.Unlock()
-	im.data[req] = time.Now()
+	Size        int64             `yaml:"size"`
+	Listen      string            `yaml:"listen"`
+	ListenGC    string            `yaml:"listen_gc"`
+	Me          string            `yaml:"me"`
+	Peers       []string          `yaml:"peers"`
+	Loader      string            `yaml:"loader"`
+	LoaderArgs  map[string]string `yaml:"loader_args"`
+	MaxWidth    int               `yaml:"max_width"`
+	MaxHeight   int               `yaml:"max_height"`
+	ResponseAge int               `yaml:"response_age"`
+	MaxInDim    int               `yaml:"max_in_dim"`
+	JpegQuality int               `yaml:"jpeg_quality"`
 }
 
 var (
@@ -143,20 +126,57 @@ func (h Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 }
 
 func main() {
+	flag.StringVar(&configName, "config", "", "configuration file name")
 
 	flag.Parse()
-	file, err := os.Open(configName)
+	Config.Size = 128
+	Config.Listen = "127.0.0.1:8080"
+	Config.ListenGC = "127.0.0.1:8081"
+	Config.Me = "http://127.0.0.1:8081"
+	Config.Peers = []string{"http://127.0.0.1:8081"}
+	Config.Loader = "http"
+	Config.LoaderArgs = map[string]string{
+		"timeout":  "10",
+		"max_size": "20971520",
+	}
+	Config.MaxWidth = 512
+	Config.MaxHeight = 512
+	Config.MaxInDim = 1024
+	Config.JpegQuality = 80
+	if configName != "" {
+		log.Printf("Loading configuration from %s", configName)
+		file, err := os.Open(configName)
+		if err != nil {
+			log.Fatal(err)
+		}
+		decoder := yaml.NewDecoder(file)
+		decoder.KnownFields(true)
+		if err = decoder.Decode(&Config); err != nil {
+			log.Fatal(err)
+		}
+		file.Close()
+	}
+	var envConfig string
+	envPrefix := "BNW_THUMB_"
+	for _, envItem := range os.Environ() {
+		envPair := strings.SplitN(envItem, "=", 2)
+		if len(envPair) == 2 && strings.HasPrefix(envPair[0], envPrefix) {
+			envConfig += strings.ToLower(envPair[0][len(envPrefix):]) + ": " + envPair[1] + "\n"
+		}
+	}
+	if envConfig != "" {
+		log.Printf("Configuration synthesized from %s* environment variables:\n%s", envPrefix, envConfig)
+		decoder := yaml.NewDecoder(strings.NewReader(envConfig))
+		decoder.KnownFields(true)
+		if err := decoder.Decode(&Config); err != nil {
+			log.Fatal(err)
+		}
+	}
+	cfgStr, err := yaml.Marshal(&Config)
 	if err != nil {
 		log.Fatal(err)
 	}
-	fileContents, err := ioutil.ReadAll(file)
-	if err != nil {
-		log.Fatal(err)
-	}
-	err = json.Unmarshal(fileContents, &Config)
-	if err != nil {
-		log.Fatal(err)
-	}
+	log.Printf("Active configuration:\n%s", cfgStr)
 
 	loader, ok := loaders[Config.Loader]
 	if !ok {
@@ -185,7 +205,7 @@ func main() {
 
 	//http.HandleFunc("/status", statusHandler)
 	//http.HandleFunc("/", thumbHandler)
-	fmt.Fprintf(os.Stderr, "Going to listen on %s\n", Config.Listen)
+	log.Printf("Going to listen on %s", Config.Listen)
 	server := &http.Server{Addr: Config.Listen, Handler: Handler{}}
 	server.ListenAndServe()
 }

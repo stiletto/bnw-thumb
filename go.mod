@@ -7,4 +7,5 @@ require (
 	github.com/golang/protobuf v1.3.5 // indirect
 	github.com/nfnt/resize v0.0.0-20180221191011-83c6a9932646
 	golang.org/x/image v0.0.0-20200119044424-58c23975cae1
+	gopkg.in/yaml.v3 v3.0.0-20200601152816-913338de1bd2
 )
