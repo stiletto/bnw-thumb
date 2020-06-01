@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"image"
 	"image/gif"
@@ -28,7 +29,7 @@ type Renderer struct {
 	JpegQuality int
 }
 
-func (r *Renderer) Get(ctx groupcache.Context, key string, dest groupcache.Sink) error {
+func (r *Renderer) Get(ctx context.Context, key string, dest groupcache.Sink) error {
 	data, err := r.Render(key)
 	if err == nil {
 		atomic.AddUint64(&status.ThumbsGenerated, 1)

@@ -69,9 +69,8 @@ func thumbHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var ctx groupcache.Context
 	var data []byte
-	err := Group.Get(ctx, uri[2], groupcache.AllocatingByteSliceSink(&data))
+	err := Group.Get(r.Context(), uri[2], groupcache.AllocatingByteSliceSink(&data))
 	if err != nil {
 		log.Printf("GC: %s", err.Error())
 		if v, ok := err.(*HttpLoaderError); ok {
